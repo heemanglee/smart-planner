@@ -172,11 +172,17 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
             # Run agent
             agent = ReActAgent()
             full_response = ""
+            after_tool_use = False  # Track if we just finished tool execution
 
             async for event in agent.run_stream(messages):
                 if event.event_type == "text_delta":
-                    full_response += event.content
-                    yield f"event: text\ndata: {json.dumps({'content': event.content}, ensure_ascii=False)}\n\n"
+                    content = event.content
+                    # Add line breaks before text that follows tool execution
+                    if after_tool_use and full_response and not full_response.endswith("\n"):
+                        content = "\n\n" + content
+                        after_tool_use = False
+                    full_response += content
+                    yield f"event: text\ndata: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
 
                 elif event.event_type == "tool_use":
                     yield f"event: tool_use\ndata: {json.dumps({'name': event.tool_call.name, 'input': event.tool_call.input}, ensure_ascii=False)}\n\n"
@@ -184,6 +190,7 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
                 elif event.event_type == "tool_result":
                     result_data = json.loads(event.tool_result.content)
                     yield f"event: tool_result\ndata: {json.dumps({'tool_use_id': event.tool_result.tool_use_id, 'result': result_data}, ensure_ascii=False)}\n\n"
+                    after_tool_use = True  # Mark that next text follows tool execution
 
                 elif event.event_type == "done":
                     # Save assistant message
