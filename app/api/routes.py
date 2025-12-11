@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.agent import ReActAgent, AgentState
+from app.agent import ReActAgent
 from app.api.schemas import (
     ChatRequest,
     ErrorResponse,
@@ -28,6 +29,12 @@ router = APIRouter(prefix="/api", tags=["api"])
 # Initialize session manager
 session_manager = SessionManager()
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 
 # Session endpoints
 @router.post(
@@ -39,6 +46,7 @@ async def create_session(request: SessionCreate) -> SessionResponse:
     """Create a new session."""
     try:
         session = session_manager.create_session(title=request.title)
+        logger.info(f"created session: {session.id}")
         return SessionResponse(
             id=session.id,
             title=session.title,
