@@ -179,6 +179,7 @@ class GetCalendarAvailabilityTool(BaseTool):
                     "summary": event.get("summary", "No title"),
                     "start": start,
                     "end": end,
+                    "description": event.get("description", ""),
                     "location": event.get("location", ""),
                     "calendar": event.get("_calendar_name", ""),
                 })
