@@ -21,7 +21,7 @@ from app.api.schemas import (
     ToolParameterResponse,
     ToolResponse,
 )
-from app.session import Message, SessionManager, generate_title
+from app.session import Message, SessionManager, generate_title, regenerate_title_from_conversation
 from app.tools import registry
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -135,6 +135,37 @@ async def delete_session(session_id: str) -> dict:
     return {"message": "Session deleted"}
 
 
+@router.post(
+    "/sessions/{session_id}/regenerate-title",
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def regenerate_session_title(session_id: str) -> dict:
+    """Regenerate session title from conversation history."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get all messages from the session
+    messages = [
+        {"role": m.role, "content": m.content}
+        for m in session.messages
+        if m.role in ("user", "assistant")
+    ]
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="No messages in session")
+
+    try:
+        # Generate new title from full conversation
+        new_title = await regenerate_title_from_conversation(messages)
+        session_manager.update_title(session_id, new_title)
+        logger.info(f"Regenerated title for session {session_id}: {new_title}")
+        return {"title": new_title}
+    except Exception as e:
+        logger.error(f"Failed to regenerate title: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Chat endpoint
 @router.post(
     "/sessions/{session_id}/chat",
@@ -171,6 +202,7 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
             after_tool_use = False  # Track if we just finished tool execution
 
             async for event in agent.run_stream(messages):
+                # claude streaming answer (chunk)
                 if event.event_type == "text_delta":
                     content = event.content
                     # Add line breaks before text that follows tool execution
@@ -180,9 +212,11 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
                     full_response += content
                     yield f"event: text\ndata: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
 
+                # call tool
                 elif event.event_type == "tool_use":
                     yield f"event: tool_use\ndata: {json.dumps({'name': event.tool_call.name, 'input': event.tool_call.input}, ensure_ascii=False)}\n\n"
 
+                # tool result
                 elif event.event_type == "tool_result":
                     result_data = json.loads(event.tool_result.content)
                     yield f"event: tool_result\ndata: {json.dumps({'tool_use_id': event.tool_result.tool_use_id, 'result': result_data}, ensure_ascii=False)}\n\n"
@@ -203,6 +237,7 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
                     yield f"event: error\ndata: {json.dumps({'error': event.content}, ensure_ascii=False)}\n\n"
 
                 # Small delay for streaming
+                # 버퍼에 쌓이지 않도록 플러시 보장
                 await asyncio.sleep(0.01)
 
         except Exception as e:

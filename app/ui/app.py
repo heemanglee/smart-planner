@@ -53,6 +53,19 @@ def delete_session(session_id: str):
         return False
 
 
+def regenerate_title(session_id: str):
+    """Regenerate session title."""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/sessions/{session_id}/regenerate-title",
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json().get("title")
+    except Exception:
+        return None
+
+
 def fetch_session_detail(session_id: str):
     """Fetch session detail."""
     try:
@@ -112,7 +125,7 @@ def render_sidebar():
         sessions = fetch_sessions()
 
         for session in sessions:
-            col1, col2 = st.columns([4, 1])
+            col1, col2, col3 = st.columns([4, 1, 1])
 
             with col1:
                 is_current = session["id"] == st.session_state.current_session_id
@@ -133,6 +146,12 @@ def render_sidebar():
                     st.rerun()
 
             with col2:
+                if st.button("🔄", key=f"regenerate_{session['id']}", help="제목 재생성"):
+                    new_title = regenerate_title(session["id"])
+                    if new_title:
+                        st.rerun()
+
+            with col3:
                 if st.button("🗑️", key=f"delete_{session['id']}"):
                     if delete_session(session["id"]):
                         if st.session_state.current_session_id == session["id"]:
