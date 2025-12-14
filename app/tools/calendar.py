@@ -1,8 +1,9 @@
 """Google Calendar tool for checking availability."""
 
 import json
+import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from googleapiclient.discovery import build
 
 from app.config import settings
 from app.tools.base import BaseTool, ToolParameter
+
+logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 TOKEN_PATH = Path("token.json")
@@ -72,7 +75,7 @@ class GetCalendarAvailabilityTool(BaseTool):
     def description(self) -> str:
         return (
             "Get calendar events and available time slots for a given date range. "
-            "Returns existing events and free time slots."
+            "Returns existing events and free time slots from all accessible calendars."
         )
 
     @property
@@ -88,8 +91,8 @@ class GetCalendarAvailabilityTool(BaseTool):
             ),
             "calendar_id": ToolParameter(
                 type="string",
-                description="Calendar ID to check (default: primary)",
-                default="primary",
+                description="Calendar ID to check. Use 'all' to check all accessible calendars (default), or specify a specific calendar ID.",
+                default="all",
             ),
         }
 
@@ -99,43 +102,77 @@ class GetCalendarAvailabilityTool(BaseTool):
         Args:
             start_date: Start date (YYYY-MM-DD).
             end_date: End date (YYYY-MM-DD).
-            calendar_id: Calendar ID (default: primary).
+            calendar_id: Calendar ID (default: all - fetches from all calendars).
 
         Returns:
             Dict with events and free_slots.
         """
         start_date = kwargs["start_date"]
         end_date = kwargs["end_date"]
-        calendar_id = kwargs.get("calendar_id", "primary")
+        calendar_id = kwargs.get("calendar_id", "all")
 
         try:
             service = get_calendar_service()
 
-            # Parse dates
-            start_dt = datetime.fromisoformat(start_date)
-            end_dt = datetime.fromisoformat(end_date) + timedelta(days=1)
-
-            time_min = start_dt.isoformat() + "Z"
-            time_max = end_dt.isoformat() + "Z"
-
-            # Get events
-            events_result = (
-                service.events()
-                .list(
-                    calendarId=calendar_id,
-                    timeMin=time_min,
-                    timeMax=time_max,
-                    singleEvents=True,
-                    orderBy="startTime",
-                )
-                .execute()
+            # Parse dates and add timezone info
+            # Using local timezone for proper time range
+            from zoneinfo import ZoneInfo
+            local_tz = ZoneInfo("Asia/Seoul")
+            
+            start_dt = datetime.fromisoformat(start_date).replace(
+                hour=0, minute=0, second=0, tzinfo=local_tz
+            )
+            end_dt = (datetime.fromisoformat(end_date) + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, tzinfo=local_tz
             )
 
-            events = events_result.get("items", [])
+            # Format as RFC 3339 for Google Calendar API
+            time_min = start_dt.isoformat()
+            time_max = end_dt.isoformat()
+
+            logger.info(f"Fetching calendar events from {time_min} to {time_max}")
+            logger.info(f"Using calendar_id: {calendar_id}")
+
+            # Determine which calendars to fetch from
+            if calendar_id == "all":
+                # Get all accessible calendars
+                calendar_list = service.calendarList().list().execute()
+                calendars = calendar_list.get("items", [])
+                calendar_ids = [(cal["id"], cal.get("summary", cal["id"])) for cal in calendars]
+                logger.info(f"Found {len(calendar_ids)} calendars to check")
+            else:
+                calendar_ids = [(calendar_id, calendar_id)]
+
+            # Fetch events from all selected calendars
+            all_events = []
+            for cal_id, cal_name in calendar_ids:
+                try:
+                    events_result = (
+                        service.events()
+                        .list(
+                            calendarId=cal_id,
+                            timeMin=time_min,
+                            timeMax=time_max,
+                            singleEvents=True,
+                            orderBy="startTime",
+                        )
+                        .execute()
+                    )
+                    events = events_result.get("items", [])
+                    logger.info(f"Calendar '{cal_name}': found {len(events)} events")
+                    
+                    # Add calendar info to each event
+                    for event in events:
+                        event["_calendar_name"] = cal_name
+                    all_events.extend(events)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch from calendar '{cal_name}': {e}")
+
+            logger.info(f"Total events found: {len(all_events)}")
 
             # Format events
             formatted_events = []
-            for event in events:
+            for event in all_events:
                 start = event["start"].get("dateTime", event["start"].get("date"))
                 end = event["end"].get("dateTime", event["end"].get("date"))
                 formatted_events.append({
@@ -143,7 +180,11 @@ class GetCalendarAvailabilityTool(BaseTool):
                     "start": start,
                     "end": end,
                     "location": event.get("location", ""),
+                    "calendar": event.get("_calendar_name", ""),
                 })
+
+            # Sort events by start time
+            formatted_events.sort(key=lambda x: x["start"])
 
             # Calculate free slots (simplified: 9AM-6PM working hours)
             free_slots = self._calculate_free_slots(
@@ -158,6 +199,7 @@ class GetCalendarAvailabilityTool(BaseTool):
             }
 
         except Exception as e:
+            logger.error(f"Error fetching calendar events: {e}")
             return {
                 "success": False,
                 "error": str(e),
