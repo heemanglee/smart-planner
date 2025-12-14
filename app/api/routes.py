@@ -189,17 +189,18 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
                 session_manager.update_title(session_id, title)
                 yield f"event: title\ndata: {json.dumps({'title': title}, ensure_ascii=False)}\n\n"
 
-            # Get conversation history
-            messages = [
-                {"role": m.role, "content": m.content}
-                for m in session_manager.get_messages(session_id)
-                if m.role in ("user", "assistant")
-            ]
+            # Get conversation history with tool results (for context reuse)
+            current_session = session_manager.get_session(session_id)
+            messages = current_session.get_messages_for_api()
 
             # Run agent
             agent = ReActAgent()
             full_response = ""
             after_tool_use = False  # Track if we just finished tool execution
+            
+            # Collect tool calls and results for saving
+            collected_tool_calls = []
+            collected_tool_results = {}
 
             async for event in agent.run_stream(messages):
                 # claude streaming answer (chunk)
@@ -214,22 +215,42 @@ async def chat(session_id: str, request: ChatRequest) -> StreamingResponse:
 
                 # call tool
                 elif event.event_type == "tool_use":
+                    # Collect tool call info
+                    collected_tool_calls.append({
+                        "id": event.tool_call.id,
+                        "name": event.tool_call.name,
+                        "input": event.tool_call.input,
+                    })
                     yield f"event: tool_use\ndata: {json.dumps({'name': event.tool_call.name, 'input': event.tool_call.input}, ensure_ascii=False)}\n\n"
 
                 # tool result
                 elif event.event_type == "tool_result":
                     result_data = json.loads(event.tool_result.content)
+                    # Collect tool result
+                    collected_tool_results[event.tool_result.tool_use_id] = result_data
                     yield f"event: tool_result\ndata: {json.dumps({'tool_use_id': event.tool_result.tool_use_id, 'result': result_data}, ensure_ascii=False)}\n\n"
                     after_tool_use = True  # Mark that next text follows tool execution
 
                 elif event.event_type == "done":
-                    # Save assistant message
-                    if full_response:
-                        assistant_message = Message(
-                            role="assistant",
-                            content=full_response,
+                    # Save assistant message with tool calls
+                    from app.session.models import ToolCall
+                    
+                    tool_calls_to_save = [
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            input=tc["input"],
+                            result=collected_tool_results.get(tc["id"]),
                         )
-                        session_manager.add_message(session_id, assistant_message)
+                        for tc in collected_tool_calls
+                    ]
+                    
+                    assistant_message = Message(
+                        role="assistant",
+                        content=full_response,
+                        tool_calls=tool_calls_to_save,
+                    )
+                    session_manager.add_message(session_id, assistant_message)
 
                     yield f"event: done\ndata: {json.dumps({'status': 'completed'}, ensure_ascii=False)}\n\n"
 
